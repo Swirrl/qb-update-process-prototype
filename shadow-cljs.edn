@@ -1,0 +1,11 @@
+;; shadow-cljs configuration
+{:deps {:aliases [:cider-shadow]}
+
+ :dev-http {8080 "public"}
+ :builds
+ {:frontend
+  {:target :browser
+   :devtools {;:before-load  qb.app/stop
+              ;:after-load qb.app/init
+              }
+   :modules {:main {:init-fn qbup.app/init}}}}}
