@@ -13,6 +13,9 @@
 (defmethod render-cell :comp-hash [_ value]
   (subs value 0 8))
 
+(defmethod render-cell :corrects [_ value]
+  (some-> value (subs 0 8)))
+
 (defmethod render-cell :default [_ value]
   (str value))
 
@@ -55,7 +58,7 @@
 
 (defn component-schema [{:keys [columns] :as schema}]
   (->> columns
-       (filter (comp #{:qb/component :qb/dimension} :coltype))
+       (filter (comp #{:qb/dimension :qb/attribute} :coltype))
        (map :name)))
 
 (defn hash-components [schema row]
@@ -72,38 +75,57 @@
 (defn make-rows [& row-data]
   (set (hash-rows default-schema row-data)))
 
-(def example-history [{:append (make-rows {:area "W06000022" :period "2004-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 76.7}
-                                          {:area "W06000022" :period "2004-01-01T00:00:00/P3Y" :sex "Female" :life-expectancy 80.7})
-                       :comment "Add initial data"}
+(defn simulate-user-correction
+  "Simulate what a correction by a user might look like, i.e. it will be
+  an old-row where the component hashes no longer match the data."
+  [schema row column-id new-value]
+  (let [original (first (hash-rows schema [row]))]
+    (assoc original column-id new-value)))
 
-                      {:append
-                       (make-rows {:area "W06000022" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1}
-                                  {:area "W06000022" :period "2005-01-01T00:00:00/P3Y" :sex "Female" :life-expectancy 80.9})
-                       :comment "Add 2005 data"}
+(defn make-correction [old-row new-kvps]
+  (let [old-obs (first (make-rows old-row))
+        new-obs (-> (first (make-rows (merge old-row new-kvps)))
+                    (assoc :corrects (:row-hash old-obs)))]
+    {:append #{new-obs}
+     :delete #{old-obs}}))
 
-                      {:append (make-rows {:area "mistake" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1})
-                       :comment "mistake accidentally added"}
+(def example-history (let [obs-to-correct {:area "W06000022" :period "2004-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 76999.7}]
+                       [{:append (make-rows obs-to-correct
+                                            {:area "W06000022" :period "2004-01-01T00:00:00/P3Y" :sex "Female" :life-expectancy 80.7})
+                         :comment "Add initial 2004 data"}
 
-                      {:delete (make-rows {:area "mistake" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1})
-                       :comment "Delete mistaken observation entry"}])
+                        {:append
+                         (make-rows {:area "W06000022" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 72.9}
+                                    {:area "W06000022" :period "2005-01-01T00:00:00/P3Y" :sex "Female" :life-expectancy 80.9})
+                         :comment "Upload 2005 data"}
+
+                        {:append (make-rows {:area "mistake" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1})
+                         :comment "Add more data"}
+
+                        {:delete (make-rows {:area "mistake" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1})
+                         :comment "Delete mistaken observation entry"}
+
+                        (-> (make-correction obs-to-correct ;; correct phat fingered obs
+                                             {:life-expectancy 77.1})
+                            (assoc :comment "Make a correction where the cat ran over the keyboard"))]))
+
+
 
 (defn replay-changes
   "Returns a lazy sequence of reductions showing the state of the
   table at every revision"
   [history]
   (reductions
-   (fn [current-table {:keys [append delete amend]}]
-     (cond
-       append (set/union current-table append)
-       delete (set/difference current-table delete)
-       amend current-table ;; TODO
-       ))
+   (fn [current-table {:keys [append delete]}]
+     (cond-> current-table
+       append (set/union append)
+       delete (set/difference delete)))
    #{} history))
 
 
 
 (def init-release
-  {:selected-revision 4
+  {:selected-revision (count example-history)
 
    :all-schemas [:default :update]
 
@@ -127,7 +149,7 @@
         fst-rev (first revisions)]
     [:select {:name "revision"
               :default-value (:selected-revision @state)
-              :on-change #(swap! state assoc :selected-revision (-> % .-target .-value))}
+              :on-change #(swap! state assoc :selected-revision (parse-double (-> % .-target .-value)))}
      (doall
       (for [r revisions]
         [:option {:value r
@@ -136,24 +158,24 @@
            (str r " (latest)")
            r)]))]))
 
-(comment
-
-  (hash-rows
-            default-schema
-            #{{:area "W06000022" :period "2004-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 76.7}
-              {:area "W06000022" :period "2004-01-01T00:00:00/P3Y" :sex "Female" :life-expectancy 80.7}
-              {:area "W06000022" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1}
-              {:area "W06000022" :period "2005-01-01T00:00:00/P3Y" :sex "Female" :life-expectancy 80.9}
-              {:area "W06000022" :period "2006-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.0}})
-  )
-
 (defn sort-observations [row-set]
   (sort-by (apply juxt (component-schema default-schema))
            row-set))
 
-(defn table []
+(defn build-table-for-selected-revision [{:keys [selected-revision history] :as state}]
+  (sort-observations
+   (nth (drop 1 (replay-changes history))
+        (dec selected-revision))))
+
+(defn filter-history-for-selected-revision [{:keys [selected-revision history] :as state}]
+  (->> history
+       (take selected-revision)
+       (map-indexed vector)
+       (reverse)))
+
+(defn table [{:keys [selected-schema selected-revision history] :as state}]
   [:table
-   (let [columns (:columns (:selected-schema @state))]
+   (let [columns (:columns selected-schema)]
      [:<>
       [:thead
        [:tr
@@ -164,9 +186,7 @@
           [:td.datatype {:key name} [:em (str "(" (clojure.core/name datatype) ")")]])]]
 
       [:tbody
-       (let [{:keys [history selected-revision] :as state} @state
-             current-table (nth (replay-changes history)
-                                (dec selected-revision))]
+       (let [current-table (build-table-for-selected-revision state)]
          (for [row current-table]
            ^{:key row}
            [:tr
@@ -176,24 +196,63 @@
                                (render-cell coll-id cell)])]))]])])
 
 (defn toggles []
-  [:fieldset
-   "revision: " [revisions]
-   " schema: "
-   (doall
-    (for [schema-name (:all-schemas @state)]
-      [:<> {:key schema-name}
-       [:input {:type :radio
-                :name "selected-schema"
-                :value schema-name
-                :checked (boolean (= schema-name (:schema-name (:selected-schema @state))))
-                :on-change #(swap! state assoc :selected-schema (schema-name (:schemas @state)))}]
-       [:label {:for schema-name} (name schema-name)]]))])
+  [:div.toggles
+   [:fieldset
+    "revision: " [revisions]
+    " schema: "
+    (doall
+     (for [schema-name (:all-schemas @state)]
+       [:<> {:key schema-name}
+        [:input {:type :radio
+                 :name "selected-schema"
+                 :value schema-name
+                 :checked (boolean (= schema-name (:schema-name (:selected-schema @state))))
+                 :on-change #(swap! state assoc :selected-schema (schema-name (:schemas @state)))}]
+        [:label {:for schema-name} (name schema-name)]]))]])
+
+(defn history [{:keys [history] :as state}]
+  [:<>
+   [:h3 "History"]
+   [:ol.history-items
+    (for [[revision change-set] (filter-history-for-selected-revision state)
+          :let [revision (inc revision)]]
+      ^{:key revision}
+      [:li
+       [:span.revision-number
+        revision ":"]
+       [:span.history-comment (:comment change-set) " "]
+       [:span
+        (let [corrections (count (filter :corrects (:append change-set)))]
+          [:em
+           "("
+           [:span.change-count
+            (- (count (:append change-set))
+               corrections) " appends "]
+           [:span.change-count
+            (- (count (:delete change-set))
+               corrections) " deletes and "]
+           [:span.change-count
+            corrections " corrections"]
+           ")"])]])]])
+
+(defn download []
+  #_[:a {:href "#"} "download"])
+
+(defn data-and-history [state]
+  [:<>
+   [table state]
+   [download]
+   [history state]])
 
 (defn app []
   [:<>
    [:h1 "Cube Update Process Prototype"]
-   [toggles]
-   [table]])
+   [:div.revision
+    [toggles]
+    [:div.inner-revision
+     (let [state @state]
+       [data-and-history state])]]
+   ])
 
 
 
