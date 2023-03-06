@@ -25,23 +25,27 @@
    :columns [{:name :area
               :titles "Area"
               :datatype :string
-              :coltype :qb/dimension}
+              :coltype :qb/dimension
+              :valid-value? (fn [v] (= 9 (count v)))}
              {:name :period
               :titles "Period"
               :datatype :period
-              :coltype :qb/dimension}
+              :coltype :qb/dimension
+              :valid-value? (constantly true)}
              {:name :sex
               :titles "Sex"
               :datatype :string
-              :coltype :qb/dimension}
+              :coltype :qb/dimension
+              :valid-value? #{"Male" "Female" "Other"}}
              {:name :life-expectancy
               :titles "Life Expectancy"
               :datatype :double
-              :coltype :qb/measure}]})
+              :coltype :qb/measure
+              :valid-value? double?}]})
 
 (defn build-update-schema [user-schema]
   (-> user-schema
-      (assoc :schema-name :update)
+      (assoc :schema-name :extended)
       (update-in [:columns]
                  (partial cons
                           {:name :row-hash
@@ -62,8 +66,37 @@
 
 (defn component-schema [{:keys [columns] :as schema}]
   (->> columns
-       (filter (comp #{:qb/dimension :qb/attribute} :coltype))
+       (filter (comp #{:qb/dimension :qb/attribute} :coltype)) ;; TODO should probably have a dim-hash too
        (map :name)))
+
+(defn build-duplicate-schema [schema]
+  (-> schema
+      (assoc :schema-name :duplicate)
+      (update-in [:columns]
+                 (partial cons
+                          {:name :row-hash
+                           :titles "ID"
+                           :datatype :uri}))
+      (update-in [:columns] concat
+                 [{:name :duplicate-count
+                   :titles "Duplicate Count"
+                   :datatype :double}])))
+
+(defn build-corrections-schema [schema]
+  (-> schema
+      (assoc :schema-name :duplicate)
+      (update-in [:columns]
+                 (partial cons
+                          {:name :row-hash
+                           :titles "ID"
+                           :datatype :uri}))
+      (update-in [:columns] concat
+                 [{:name :previous-value
+                   :titles "Previous Value"
+                   :datatype :double}
+                  {:name :corrects
+                   :titles "Corrects Observation"
+                   :datatype :uri}])))
 
 (defn hash-components [schema row]
   (let [comp-cols (component-schema schema)]
@@ -132,10 +165,10 @@
   {:mode :mode/view-cube
    :selected-revision (count example-history)
 
-   :all-schemas [:default :update]
+   :all-schemas [:default :extended]
 
    :schemas {:default default-schema
-             :update extended-schema}
+             :extended extended-schema}
 
    :selected-schema default-schema
 
@@ -185,6 +218,10 @@
   (sort-observations
    (nth (drop 1 (replay-changes history))
         (dec selected-revision))))
+
+(defn build-table-for-last-revision [{:keys [history]}]
+  (build-table-for-selected-revision {:selected-revision (count history)
+                                      :history history}))
 
 (defn filter-history-for-selected-revision [{:keys [selected-revision history]}]
   (->> history
@@ -287,22 +324,23 @@
 
 
 (defn parse-csv [{:keys [columns]} csv-str]
-  (let [cols (map :name columns)
-        data (->> csv-str
-                  (str/split-lines)
-                  (map #(str/split % #","))
-                  (map (fn [row]
-                         (apply hash-map (interleave cols row)))))]
+  (when-not (str/blank? (str/trim csv-str))
+    (let [cols (map :name columns)
+          data (->> csv-str
+                    (str/split-lines)
+                    (map #(str/split % #","))
+                    (map (fn [row]
+                           (apply hash-map (interleave cols row)))))]
 
-    (for [row data]
-      (reduce (fn [row {col-name :name :as col}]
-                (if (get row col-name)
-                  (update row
-                          col-name
-                          #(transform-cell-datatype col %))
-                  row))
-              row
-              (:columns extended-schema)))))
+      (for [row data]
+        (reduce (fn [row {col-name :name :as col}]
+                  (if (get row col-name)
+                    (update row
+                            col-name
+                            #(transform-cell-datatype col %))
+                    row))
+                row
+                columns)))))
 
 (defn write-csv [{:keys [history select-revision selected-schema include-header] :as state}]
   (let [table-data (build-table-for-selected-revision state)
@@ -318,44 +356,34 @@
 (comment
   (write-csv @state))
 
-(defn app []
-  (let [st @state]
-    (case (:mode st)
-      :mode/view-cube [:<>
-                       [:div.revision
-                        [toggles]
-                        [:div.inner-revision
-                         [data-and-history st]]]]
+(defn tab-control [{:keys [id label disabled] :as tab-opts}]
+  [:<> [:input (assoc (dissoc tab-opts :label)
+                      :type :radio)]
+   [:label {:for id} label]])
 
-      :mode/create-revision (let [update-schema (:update (:schemas st))]
-                              [:<>
-                               [:div.revision
-                                [:div.inner-revision
-                                 [:h3 (str "Create revision: " (inc (:selected-revision st)))]
-                                 [:p "Please paste a UTF-8 CSV which conforms to the table schema below:"]
-                                 [:table
-                                  [schema-thead update-schema]
-                                  [:tbody
-                                   (for [row (:preview-data st)]
-                                     ^{:key row}
-                                     [:tr
-                                      (for [coll-id (map :name (:columns update-schema))
-                                            :let [cell (coll-id row)]]
-                                        ^{:key coll-id} [:td
-                                                         (render-cell coll-id cell)])])]]
-                                 [:br]
-                                 [:p "CSV:"]
-                                 (let [update-preview! (fn [e]
-                                                         (swap! state assoc
-                                                               :preview-data (parse-csv (-> st :schemas :update) (-> e .-target .-value))))]
-                                   [:textarea {:rows 20 :cols 145
-                                               :default-value (write-csv (assoc st :selected-schema update-schema))
-                                               :on-change update-preview!}])
-                                 [:br]
-                                 [change-screen-button "Cancel" :mode/view-cube]
-                                 [:button {:on-click #(change-screen! :mode/view-cube)} "Submit"]]]])
+(defn tabs [{:keys [_name default-tab _tabs]} _tab-panes]
+  (let [selected-tab (r/atom default-tab)]
+    (fn [{:keys [name default-tab tabs]} tab-panes]
+      (let [tab-controls (vec
+                          (cons :span.tab-controls
+                                (mapv (fn [tab-id]
+                                        (let [{:keys [label disabled] :as tab-opts} (get tab-panes tab-id)]
+                                          [tab-control (cond-> {:id tab-id
+                                                                :name name
+                                                                :label label
+                                                                :value tab-id
+                                                                :checked (= tab-id @selected-tab)
+                                                                :on-change #(reset! selected-tab tab-id)}
+                                                         disabled (assoc :disabled true))]))
+                                      tabs)))
+            selected-tab-pane (:pane (get tab-panes (or @selected-tab
+                                                         default-tab )))]
+        [:div.tabs
+         tab-controls
+         [:div.tab-pane {}
+          selected-tab-pane]]))))
 
-      [:<> [:h1 "Error"]])))
+;;;;;;;;;; validations / changes
 
 (defn index-table [table]
   {:lookup-by-comp-hash (update-vals (group-by :comp-hash table) first)
@@ -373,27 +401,23 @@
   "Takes a default-schema an index-table as produced by `index-table`
   and a new-row, and classifies the changes that occurred in the row."
   [schema {:keys [lookup-by-comp-hash lookup-by-row-hash]}
-   {:keys [row-hash comp-hash] :as new-row}]
-  (let [old-row-hash row-hash
-        new-row-hash (hash-row schema new-row)]
+   {old-row-hash :row-hash
+    old-comp-hash :comp-hash :as new-row}]
+  (let [new-row-hash (hash-row schema new-row)]
 
     (cond (= old-row-hash new-row-hash)
           [:unmodified old-row-hash]
-          :else (let [old-comp-hash comp-hash
-                      new-comp-hash (hash-components schema new-row)]
-                  (if (= old-comp-hash new-comp-hash)
-                    (let [measure-cols (->> (:columns schema)
-                                            (filter (comp #{:qb/measure} :coltype))
-                                            (map :name))
-                          old-row (lookup-by-comp-hash old-comp-hash)
-                          old-measures (map old-row measure-cols)
-                          new-measures (map new-row measure-cols)]
-                      [:measure-changed old-measures new-measures])
-                    (if (has-valid-dim-or-attribute-values? schema new-row)
+          :else (if-let [old-row (lookup-by-comp-hash old-comp-hash)]
+                  (let [measure-cols (->> (:columns schema)
+                                          (filter (comp #{:qb/measure} :coltype))
+                                          (map :name))
 
-                      [:component-change new-row]
-                      [:invalid-component-error :todo new-row] ;; TODO should validate values against codelists at which point this should be either an error or an append
-                      )
+                        old-measures (map old-row measure-cols)
+                        new-measures (map new-row measure-cols)]
+                    [:measure-changed old-measures new-measures])
+                  (if (has-valid-dim-or-attribute-values? schema new-row)
+                    [:component-change new-row]
+                    [:invalid-component-error :todo new-row] ;; TODO should validate values against codelists at which point this should be either an error or an append
                     )))))
 
 (comment
@@ -428,49 +452,266 @@
 
   :foo)
 
-(defn make-table-diff [schema orig-table new-table]
+(defn apply-validations
+  "Appends an :errors key to rows with validation failures."
+  [{:keys [columns] :as schema} table]
+  (let [validated-rows (for [row table]
+                         (reduce (fn [row {:keys [name valid-value?] :as col}]
+                                   (if (boolean (valid-value? (get row name)))
+                                     row
+                                     (merge-with set/union row {:errors #{name}})))
+                                 row columns))]
+    (if (some :errors validated-rows)
+      {:errors (filter :errors validated-rows)}
+      {})))
+
+(defn make-table-diff [{:keys [columns] :as schema} orig-table new-table]
   (let [{:keys [lookup-by-comp-hash lookup-by-row-hash] :as lookups} (index-table orig-table)
+        new-table-hashed (hash-rows schema new-table)
+        in-orig-table? (set (keys lookup-by-comp-hash))
+        appended-data (filter (comp (complement in-orig-table?) :comp-hash)
+                              new-table-hashed)]
+    (-> (apply-validations schema new-table)
+        (assoc
+         :duplicates (reduce-kv
+                      (fn [acc k-row v]
+                        (let [n (count v)]
+                          (if (>= n 2)
+                            (conj acc (assoc k-row :duplicate-count n
+                                             :errors #{:duplicate-count}))
+                            acc)))
+                      #{}
+                      (group-by identity new-table-hashed))
+         :appends appended-data
 
-        a-obs-hashes (set (keys lookup-by-row-hash))
-        mods (map (partial classify-row-change schema lookups) new-table)]
+         :deletes (let [in-new-table? (set (map :comp-hash new-table-hashed))]
+                    (filter (fn [old-row]
+                              (let [h (:comp-hash old-row)]
+                                (and (in-orig-table? h)
+                                     (not (in-new-table? h)))))
+                            orig-table))
+         :corrections (->> new-table-hashed
+                           (map (fn [new-row]
+                                  (let [orig-row (lookup-by-comp-hash (:comp-hash new-row))
+                                        measure-col (:name (first (filter (comp #{:qb/measure} :coltype) columns)))]
+                                    (if (and orig-row
+                                             (not (lookup-by-row-hash (:row-hash new-row))))
+                                      (assoc new-row
+                                             :corrects (:row-hash orig-row)
+                                             :previous-value (get orig-row measure-col))
+                                      new-row))))
+                           (filter :corrects))))))
 
-    (cond
-      (every? (comp #{:unmodified} first) mods) nil
 
-      :else mods
-      )
-
-    ))
 
 (comment
 
   (def init-table (build-table-for-selected-revision @state))
 
-  (def table-from-csv (parse-csv extended-schema "021b04a49352d9687daadd78e213d2ec,W06000022,2004-01-01T00:00:00/P3Y,Female,80.7,1e5a82bd66c5e119f858bb1a1696041a,\n392784af4099a8bea7ed89549a15ba88,W06000022,2004-01-01T00:00:00/P3Y,Male,77.1,9f9aa997aeca139349bbf2b79998e879,2151367e7ac2794836c4ffc4259fd3cc\ne4f1a5dd7d76610a330dad0e5d40eb5e,W06000022,2005-01-01T00:00:00/P3Y,Female,80.9,3a049eff5351fa090f4946b4288343b9,\nf660ccad41c647ea059e70cdf6a56657,W06000022,2005-01-01T00:00:00/P3Y,Malez,72.9,844247dc32efa49f35582ee66ad06442,"))
+  (def table-from-csv (parse-csv default-schema "W06000022,2004-01-01T00:00:00/P3Y,Female,80.7\nW06000022,2004-01-01T00:00:00/P3Y,Male,77.1\nW06000022,2005-01-01T00:00:00/P3Y,Female,80.9\nW06000022,2005-01-01T00:00:00/P3Y,Malez,72.9"))
 
+  ;; errors
   (make-table-diff default-schema
                    init-table
                    table-from-csv)
 
-;; => {:area "W06000022",
-;;     :period "2004-01-01T00:00:00/P3Y",
-;;     :sex "Female",
-;;     :life-expectancy 80.7,
-;;     :row-hash "021b04a49352d9687daadd78e213d2ec",
-;;     :comp-hash "1e5a82bd66c5e119f858bb1a1696041a"}
+  (def appended-table (concat init-table
+                              [{:area "W06000023",
+                                :period "2004-01-01T00:00:00/P3Y",
+                                :sex "Female",
+                                :life-expectancy 90.0}
+                               {:area "W06000023",
+                                :period "2004-01-01T00:00:00/P3Y",
+                                :sex "Female",
+                                :life-expectancy 90.0}]))
 
-  (first (parse-csv extended-schema "021b04a49352d9687daadd78e213d2ec,W06000022,2004-01-01T00:00:00/P3Y,Female,80.7,1e5a82bd66c5e119f858bb1a1696041a,\n392784af4099a8bea7ed89549a15ba88,W06000022,2004-01-01T00:00:00/P3Y,Male,77.1,9f9aa997aeca139349bbf2b79998e879,2151367e7ac2794836c4ffc4259fd3cc\ne4f1a5dd7d76610a330dad0e5d40eb5e,W06000022,2005-01-01T00:00:00/P3Y,Female,80.9,3a049eff5351fa090f4946b4288343b9,\nf660ccad41c647ea059e70cdf6a56657,W06000022,2005-01-01T00:00:00/P3Y,Male,72.9,844247dc32efa49f35582ee66ad06442,"))
+  (filter (comp (complement (set (keys (:lookup-by-comp-hash (index-table init-table)))))
+                :comp-hash)
+          (hash-rows default-schema appended-table))
 
-;; => {:sex "Female",
-;;     :life-expectancy "80.7",
-;;     :area "W06000022",
-;;     :period "2004-01-01T00:00:00/P3Y",
-;;     :comp-hash "1e5a82bd66c5e119f858bb1a1696041a",
-;;     :row-hash "021b04a49352d9687daadd78e213d2ec"}
+  (make-table-diff default-schema
+                   init-table
+                   appended-table)
 
   :foo)
 
+(defn schemad-data-table [schema table-data]
+  [:table
+   [schema-thead schema]
 
+   [:tbody
+    (for [[row-num {:keys [errors] :as row}] (take 10 (map-indexed vector table-data))]
+      ^{:key row-num}
+      [:tr
+       (for [coll-id (map :name (:columns schema))
+             :let [cell (coll-id row)]]
+         ^{:key coll-id} [:td (when (get errors coll-id)
+                                {:style {:background-color "pink"}})
+                          (render-cell coll-id cell)])])]])
+
+(defn failures? [{:keys [errors duplicates] :as change-data}]
+  (boolean (or (seq errors)
+               (seq duplicates))))
+
+(defn error-display [schema {:keys [errors duplicates]}]
+  (let [num-errors (count errors)]
+    [:<>
+     [:h2 (if (seq errors)
+            "❌"
+            "✅") " Validations"]
+
+     [:h3 (if (seq errors)
+            "❌"
+            "✅") " Observation validations"]
+     (if (seq errors)
+       [:<>
+        "The following " (if (>= num-errors 2)
+                           (str num-errors " observations do not conform to the table schema:")
+                           " observation does not conform to the table schema:")
+        [schemad-data-table schema errors]
+        (when (< 10 num-errors)
+          [:em "... and " (- num-errors 10) " more "])]
+
+       [:<>
+        [:p "Congratulations all observations are valid and conform to the table schema."]
+        #_[:table
+           [schema-thead schema]]])
+
+     [:h3 (if (seq duplicates)
+            [:<>
+             (str "❌ There are duplicated observations")]
+            (str "✅" " No duplicate observations found"))]
+     (when (seq duplicates)
+       [schemad-data-table (build-duplicate-schema schema) duplicates])]))
+
+(defn pane [opts & more]
+  [:div.inner-revision {:style {:border "1px solid #999"}}
+   more])
+
+(defn appends-pane [schema appends-data]
+  [pane
+   [:h3 "Appends"]
+   [:p "The following appends were detected"]
+   [schemad-data-table schema appends-data]])
+
+(defn deletes-pane [schema deletes-data]
+  [pane
+   [:h3 "Deletes"]
+   [:p "The following deletions were detected"]
+   [schemad-data-table schema deletes-data]])
+
+(defn corrections-pane [schema corrections-data]
+  [pane
+   [:h3 "Corrections"]
+   [:p "The following corrections were detected"]
+   [schemad-data-table (build-corrections-schema schema) corrections-data]])
+
+(defn categorise-change-type [{:keys [errors duplicates appends deletes corrections]}]
+  (or (and (seq appends) :appends)
+      (and (seq deletes) :deletes)
+      (and (seq corrections) :corrections)
+      :no-changes))
+
+(defn change-set [schema {:keys [errors duplicates appends deletes corrections] :as preview-changes}]
+  [:<>
+   [:h3 "Change Set"]
+   (let [default-tab (categorise-change-type preview-changes)]
+     [:<>
+      (if (= default-tab :no-changes)
+        [:p "There are no changes detected in your data."]
+        [:p "The following changes have been detected in the provided data:"])
+
+      (when-not (= default-tab :no-changes)
+        [:<>
+         [tabs {:default-tab default-tab
+                :name :change-type
+                :tabs [:appends :deletes :corrections]}
+          {:appends {:label [:<> "Appends (" (count appends) ")"]
+                     :pane [appends-pane schema appends]
+                     :disabled (zero? (count appends))}
+           :deletes {:label [:<> "Deletes (" (count deletes) ")"]
+                     :pane [deletes-pane schema deletes]
+                     :disabled (zero? (count deletes))}
+           :corrections {:label [:<> "Corrections (" (count corrections) ")"]
+                         :pane [corrections-pane schema corrections]
+                         :disabled (zero? (count corrections))}}]])])])
+
+(defn modal [{:keys [cancel-view]} & more]
+  [:<>
+   [:div.revision
+    [:div.inner-revision
+     [change-screen-button "Cancel" cancel-view]
+     more]]])
+
+(defn app []
+  (let [{:keys [history] :as st} @state]
+    (case (:mode st)
+      :mode/view-cube [:<>
+                       [:div.revision
+                        [toggles]
+                        [:div.inner-revision
+                         [data-and-history st]]]]
+
+      :mode/create-revision (let [schema (:default (:schemas st))]
+                              [modal {:cancel-view :mode/view-cube}
+                               (let [next-revision (inc (:selected-revision st))]
+                                 [:<>
+                                  [:h1 (str "Create revision: " next-revision)]]
+                                 (let [{:keys [preview-changes]} st]
+
+                                   [:<>
+                                    (if (failures? preview-changes)
+                                      [error-display schema (select-keys preview-changes [:errors :duplicates])]
+                                      [change-set schema preview-changes])
+                                    (when (and (not (failures? preview-changes))
+                                               (not= :no-changes (categorise-change-type preview-changes)))
+                                      [:<>
+                                       [:br]
+                                       [:button {:on-click (fn [_]
+                                                             (swap! state assoc :candidate/changes preview-changes)
+                                                             (change-screen! :mode/make-change-set))} "Create Change Set"]])
+
+                                    [:p "Please provide a CSV which conforms to the releases table schema."]
+                                    [:em "(Note we have loaded the data from the previous revision r" (count history) ")"]
+                                    (let [update-preview! (fn [e]
+                                                            (let [preview-data (parse-csv schema (-> e .-target .-value))]
+                                                              (swap! state assoc
+                                                                     :preview-data preview-data
+                                                                     :preview-changes (make-table-diff schema (build-table-for-last-revision st) preview-data))))]
+                                      [:textarea {:rows 20 :cols 145
+                                                  :default-value (write-csv (assoc st :selected-schema schema))
+                                                  :on-change update-preview!}])]))])
+
+      :mode/make-change-set [modal {:cancel-view :mode/view-cube}
+                             (let [next-revision (inc (:selected-revision st))]
+                               [:<>
+                                [:h1 (str "Create revision: " next-revision)]])
+                             (let [schema (:default (:schemas st))
+                                   {:keys [candidate/changes]} st]
+
+                               [:<>
+                                [:p "Commit message:"]
+                                [:textarea {:rows 5 :cols 80
+                                            :on-change (fn [e]
+                                                         (swap! state assoc :commit/message (-> e .-target .-value)))}]
+                                [:br]
+                                [:button {:on-click (fn [_]
+                                                      (let [changes (-> (set/rename-keys changes {:appends :append
+                                                                                                  :deletes :delete}) ;; TODO fix the need for this
+                                                                        (update :append set)
+                                                                        (update :delete set)
+                                                                        ;;(update :corrections set) ;; TODO corrections
+                                                                        (assoc :comment (:commit/message @state))
+                                                                        (dissoc :duplicates
+                                                                                :corrections))]
+                                                        (swap! state update :history conj changes)
+                                                        (swap! state assoc :selected-revision (count (:history @state)))
+                                                        (swap! state dissoc :preview-data)
+                                                        (swap! state assoc :mode :mode/view-cube)))}
+                                 "Commit change set"]
+                                [change-set schema changes]])]
+
+      [:<> [:h1 "Error"]])))
 
 (defn ^:dev/before-load stop []
   (js/console.log "stopping"))
