@@ -18,3 +18,6 @@ pom.xml.asc
 
 .hgignore
 .hg/
+/docs/js/manifest.edn
+/docs/js/cljs-runtime/
+/.envrc
