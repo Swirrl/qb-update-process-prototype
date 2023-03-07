@@ -17,11 +17,14 @@
 (defmethod render-cell :corrects [_ value]
   (some-> value (subs 0 8)))
 
+(defmethod render-cell :operation-type [_ value]
+  (str/upper-case (name value)))
+
 (defmethod render-cell :default [_ value]
   (str value))
 
 (def default-schema
-  {:schema-name :default
+  {:schema-name :schema/default
    :columns [{:name :area
               :titles "Area"
               :datatype :string
@@ -45,7 +48,7 @@
 
 (defn build-update-schema [user-schema]
   (-> user-schema
-      (assoc :schema-name :extended)
+      (assoc :schema-name :schema/extended)
       (update-in [:columns]
                  (partial cons
                           {:name :row-hash
@@ -71,7 +74,7 @@
 
 (defn build-duplicate-schema [schema]
   (-> schema
-      (assoc :schema-name :duplicate)
+      (assoc :schema-name :schema/duplicate)
       (update-in [:columns]
                  (partial cons
                           {:name :row-hash
@@ -84,7 +87,7 @@
 
 (defn build-corrections-schema [schema]
   (-> schema
-      (assoc :schema-name :duplicate)
+      (assoc :schema-name :schema/corrections)
       (update-in [:columns]
                  (partial cons
                           {:name :row-hash
@@ -97,6 +100,32 @@
                   {:name :corrects
                    :titles "Corrects Observation"
                    :datatype :uri}])))
+
+(defn build-delta-schema [schema]
+  (-> schema
+      (assoc :schema-name :schema/delta)
+      (update-in [:columns]
+                 (partial cons
+                          {:name :row-hash
+                           :titles "Observation ID"
+                           :datatype :uri}))
+      (update-in [:columns]
+                 (partial cons
+                          {:name :operation-type
+                           :titles "Operation"
+                           :datatype :string}))
+      (update-in [:columns]
+                 (partial cons
+                          {:name :revision-id
+                           :titles "Revision ID"
+                           :datatype :double}))
+      (update-in [:columns] concat
+                 [{:name :corrects
+                   :titles "Corrects Observation"
+                   :datatype :uri}
+                  {:name :comment
+                   :titles "Commit message"
+                   :datatype :string}])))
 
 (defn hash-components [schema row]
   (let [comp-cols (component-schema schema)]
@@ -136,10 +165,10 @@
                                     {:area "W06000022" :period "2005-01-01T00:00:00/P3Y" :sex "Female" :life-expectancy 80.9})
                          :comment "Upload 2005 data"}
 
-                        {:append (make-rows {:area "mistake" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1})
-                         :comment "Add more data"}
+                        {:append (make-rows {:area "W06000022" :period "2999-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1})
+                         :comment "Add more data with a mistake we will remove in a future revision"}
 
-                        {:delete (make-rows {:area "mistake" :period "2005-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1})
+                        {:delete (make-rows {:area "W06000022" :period "2999-01-01T00:00:00/P3Y" :sex "Male" :life-expectancy 77.1})
                          :comment "Delete mistaken observation entry"}
 
                         (-> (make-correction obs-to-correct ;; correct phat fingered obs
@@ -165,10 +194,10 @@
   {:mode :mode/view-cube
    :selected-revision (count example-history)
 
-   :all-schemas [:default :extended]
+   :all-schemas [:schema/default :schema/extended]
 
-   :schemas {:default default-schema
-             :extended extended-schema}
+   :schemas {:schema/default default-schema
+             :schema/extended extended-schema}
 
    :selected-schema default-schema
 
@@ -278,9 +307,11 @@
       [change-screen-button btn-opts
        "Create revision" :mode/create-revision])]])
 
-(defn history [{:keys [history] :as state}]
+(defn history [{:keys [_history] :as state}]
   [:<>
    [:h3 "History"]
+   [:a {:href "#"
+        :on-click (fn [_] (change-screen! :mode/view-deltas))} "View all"]
    [:ol.history-items
     (for [[revision change-set] (filter-history-for-selected-revision state)
           :let [revision (inc revision)]]
@@ -313,14 +344,14 @@
    [download]
    [history state]])
 
-(defmulti transform-cell-datatype (fn [col val]
-                                      (:datatype col)))
+(defmulti transform-cell-datatype (fn [col _val]
+                                    (:datatype col)))
 
-(defmethod transform-cell-datatype :double [col val]
-    (parse-double val))
+(defmethod transform-cell-datatype :double [_col val]
+  (parse-double val))
 
-(defmethod transform-cell-datatype :default [col val]
-    val)
+(defmethod transform-cell-datatype :default [_colcol val]
+  val)
 
 
 (defn parse-csv [{:keys [columns]} csv-str]
@@ -342,7 +373,7 @@
                 row
                 columns)))))
 
-(defn write-csv [{:keys [history select-revision selected-schema include-header] :as state}]
+(defn write-csv [{:keys [selected-schema include-header] :as state}]
   (let [table-data (build-table-for-selected-revision state)
         cols (map :name (:columns selected-schema))
         row-strs (str/join "\n"
@@ -356,14 +387,14 @@
 (comment
   (write-csv @state))
 
-(defn tab-control [{:keys [id label disabled] :as tab-opts}]
+(defn tab-control [{:keys [id label] :as tab-opts}]
   [:<> [:input (assoc (dissoc tab-opts :label)
                       :type :radio)]
    [:label {:for id} label]])
 
 (defn tabs [{:keys [_name default-tab _tabs]} _tab-panes]
   (let [selected-tab (r/atom default-tab)]
-    (fn [{:keys [name default-tab tabs]} tab-panes]
+    (fn [{:keys [name _default-tab tabs]} tab-panes]
       (let [tab-controls (vec
                           (cons :span.tab-controls
                                 (mapv (fn [tab-id]
@@ -376,8 +407,7 @@
                                                                 :on-change #(reset! selected-tab tab-id)}
                                                          disabled (assoc :disabled true))]))
                                       tabs)))
-            selected-tab-pane (:pane (get tab-panes (or @selected-tab
-                                                         default-tab )))]
+            selected-tab-pane (:pane (get tab-panes @selected-tab))]
         [:div.tabs
          tab-controls
          [:div.tab-pane {}
@@ -394,69 +424,14 @@
   the set of values in the codelist.
 
   If the code does not exist in the list, then we should raise an error."
-  [schema new-row]
+  [_schema _new-row]
   true)
-
-(defn classify-row-change
-  "Takes a default-schema an index-table as produced by `index-table`
-  and a new-row, and classifies the changes that occurred in the row."
-  [schema {:keys [lookup-by-comp-hash lookup-by-row-hash]}
-   {old-row-hash :row-hash
-    old-comp-hash :comp-hash :as new-row}]
-  (let [new-row-hash (hash-row schema new-row)]
-
-    (cond (= old-row-hash new-row-hash)
-          [:unmodified old-row-hash]
-          :else (if-let [old-row (lookup-by-comp-hash old-comp-hash)]
-                  (let [measure-cols (->> (:columns schema)
-                                          (filter (comp #{:qb/measure} :coltype))
-                                          (map :name))
-
-                        old-measures (map old-row measure-cols)
-                        new-measures (map new-row measure-cols)]
-                    [:measure-changed old-measures new-measures])
-                  (if (has-valid-dim-or-attribute-values? schema new-row)
-                    [:component-change new-row]
-                    [:invalid-component-error :todo new-row] ;; TODO should validate values against codelists at which point this should be either an error or an append
-                    )))))
-
-(comment
-
-  (def previous-table (build-table-for-selected-revision @state))
-
-  (=
-   '[:measure-changed (80.7) (78.3)]
-   (classify-row-change default-schema
-                        (index-table previous-table)
-                        (assoc (first previous-table)
-                               :life-expectancy 78.3)))
-
-  (= [:component-change
-      {:area "W06000022",
-       :period "2004-01-01T00:00:00/P3Y",
-       :sex "malez",
-       :life-expectancy 77.1,
-       :row-hash "392784af4099a8bea7ed89549a15ba88",
-       :comp-hash "9f9aa997aeca139349bbf2b79998e879",
-       :corrects "2151367e7ac2794836c4ffc4259fd3cc"}]
-
-     (classify-row-change default-schema
-                          previous-table
-                          (assoc (second (build-table-for-selected-revision @state))
-                                 :sex "malez")))
-
-  (= [:unmodified "021b04a49352d9687daadd78e213d2ec"]
-     (classify-row-change default-schema
-                          previous-table
-                          (first (build-table-for-selected-revision @state))))
-
-  :foo)
 
 (defn apply-validations
   "Appends an :errors key to rows with validation failures."
-  [{:keys [columns] :as schema} table]
+  [{:keys [columns] :as _schema} table]
   (let [validated-rows (for [row table]
-                         (reduce (fn [row {:keys [name valid-value?] :as col}]
+                         (reduce (fn [row {:keys [name valid-value?] :as _col}]
                                    (if (boolean (valid-value? (get row name)))
                                      row
                                      (merge-with set/union row {:errors #{name}})))
@@ -466,14 +441,14 @@
       {})))
 
 (defn make-table-diff [{:keys [columns] :as schema} orig-table new-table]
-  (let [{:keys [lookup-by-comp-hash lookup-by-row-hash] :as lookups} (index-table orig-table)
+  (let [{:keys [lookup-by-comp-hash lookup-by-row-hash]} (index-table orig-table)
         new-table-hashed (hash-rows schema new-table)
         in-orig-table? (set (keys lookup-by-comp-hash))
         appended-data (filter (comp (complement in-orig-table?) :comp-hash)
                               new-table-hashed)]
     (-> (apply-validations schema new-table)
         (assoc
-         :duplicates (reduce-kv
+         :duplicate (reduce-kv
                       (fn [acc k-row v]
                         (let [n (count v)]
                           (if (>= n 2)
@@ -482,9 +457,9 @@
                             acc)))
                       #{}
                       (group-by identity new-table-hashed))
-         :appends appended-data
+         :append appended-data
 
-         :deletes (let [in-new-table? (set (map :comp-hash new-table-hashed))]
+         :delete (let [in-new-table? (set (map :comp-hash new-table-hashed))]
                     (filter (fn [old-row]
                               (let [h (:comp-hash old-row)]
                                 (and (in-orig-table? h)
@@ -498,7 +473,8 @@
                                              (not (lookup-by-row-hash (:row-hash new-row))))
                                       (assoc new-row
                                              :corrects (:row-hash orig-row)
-                                             :previous-value (get orig-row measure-col))
+                                             :previous-value (get orig-row measure-col)
+                                             :previous-obs orig-row)
                                       new-row))))
                            (filter :corrects))))))
 
@@ -549,11 +525,44 @@
                                 {:style {:background-color "pink"}})
                           (render-cell coll-id cell)])])]])
 
-(defn failures? [{:keys [errors duplicates] :as change-data}]
-  (boolean (or (seq errors)
-               (seq duplicates))))
+(defn history-data-table [_schema _table-data]
+  (let [hover-value (r/atom nil)]
+    (fn [schema table-data]
+      [:<>
+       (when-not (nil? @hover-value)
+         [:<>
+          [:button {:on-click #(reset! hover-value nil)}
+           "Clear filter"]
+          [:br]
+          (str "Filtered to: " @hover-value " ")])
+       [:table
+        [schema-thead schema]
 
-(defn error-display [schema {:keys [errors duplicates]}]
+        [:tbody
+         (for [[row-num {:keys [operation-type] :as row}] (->> (if (nil? @hover-value)
+                                                                 table-data
+                                                                 (filter (fn [row]
+                                                                           (or (= @hover-value (get row :row-hash))
+                                                                               (= @hover-value (get row :corrects))))
+                                                                         table-data))
+                                                               (map-indexed vector))]
+           ^{:key row-num}
+           [:tr (case operation-type
+                  :append {:style {:background-color "#9be9a8"}} ;; green
+                  :delete {:style {:background-color "pink"}})
+            (for [coll-id (map :name (:columns schema))
+                  :let [cell (coll-id row)]]
+              ^{:key coll-id} [:td (when (#{:row-hash :corrects} coll-id)
+                                     {:style {:cursor "pointer"}
+                                      :on-click (fn [_]
+                                                  (reset! hover-value cell))})
+                               (render-cell coll-id cell)])])]]])))
+
+(defn failures? [{:keys [errors duplicate] :as change-data}]
+  (boolean (or (seq errors)
+               (seq duplicate))))
+
+(defn error-display [schema {:keys [errors duplicate]}]
   (let [num-errors (count errors)]
     [:<>
      [:h2 (if (seq errors)
@@ -577,16 +586,16 @@
         #_[:table
            [schema-thead schema]]])
 
-     [:h3 (if (seq duplicates)
+     [:h3 (if (seq duplicate)
             [:<>
              (str "❌ There are duplicated observations")]
             (str "✅" " No duplicate observations found"))]
-     (when (seq duplicates)
-       [schemad-data-table (build-duplicate-schema schema) duplicates])]))
+     (when (seq duplicate)
+       [schemad-data-table (build-duplicate-schema schema) duplicate])]))
 
 (defn pane [opts & more]
   [:div.inner-revision {:style {:border "1px solid #999"}}
-   more])
+   (vec (concat [:<>] more))])
 
 (defn appends-pane [schema appends-data]
   [pane
@@ -606,16 +615,31 @@
    [:p "The following corrections were detected"]
    [schemad-data-table (build-corrections-schema schema) corrections-data]])
 
-(defn categorise-change-type [{:keys [errors duplicates appends deletes corrections]}]
-  (or (and (seq appends) :appends)
-      (and (seq deletes) :deletes)
-      (and (seq corrections) :corrections)
+(defn categorise-change-tab [{:keys [errors duplicate append delete corrections]}]
+  (or (and (seq append) :tab/appends)
+      (and (seq delete) :tab/deletes)
+      (and (seq corrections) :tab/corrections)
       :no-changes))
 
-(defn change-set [schema {:keys [errors duplicates appends deletes corrections] :as preview-changes}]
+(defn change-set-tabs [{:keys [default-tab name] :as opts}
+                       schema {:keys [errors duplicate append delete corrections] :as preview-changes}]
+  [tabs {:default-tab default-tab
+         :name name
+         :tabs [:tab/appends :tab/deletes :tab/corrections]}
+   {:tab/appends {:label [:<> "Appends (" (count append) ")"]
+                  :pane [appends-pane schema append]
+                  :disabled (zero? (count append))}
+    :tab/deletes {:label [:<> "Deletes (" (count delete) ")"]
+                  :pane [deletes-pane schema delete]
+                  :disabled (zero? (count delete))}
+    :tab/corrections {:label [:<> "Corrections (" (count corrections) ")"]
+                      :pane [corrections-pane schema corrections]
+                      :disabled (zero? (count corrections))}}])
+
+(defn change-set [schema {:keys [errors duplicate append delete corrections] :as preview-changes}]
   [:<>
    [:h3 "Change Set"]
-   (let [default-tab (categorise-change-type preview-changes)]
+   (let [default-tab (categorise-change-tab preview-changes)]
      [:<>
       (if (= default-tab :no-changes)
         [:p "There are no changes detected in your data."]
@@ -623,25 +647,44 @@
 
       (when-not (= default-tab :no-changes)
         [:<>
-         [tabs {:default-tab default-tab
-                :name :change-type
-                :tabs [:appends :deletes :corrections]}
-          {:appends {:label [:<> "Appends (" (count appends) ")"]
-                     :pane [appends-pane schema appends]
-                     :disabled (zero? (count appends))}
-           :deletes {:label [:<> "Deletes (" (count deletes) ")"]
-                     :pane [deletes-pane schema deletes]
-                     :disabled (zero? (count deletes))}
-           :corrections {:label [:<> "Corrections (" (count corrections) ")"]
-                         :pane [corrections-pane schema corrections]
-                         :disabled (zero? (count corrections))}}]])])])
+         [change-set-tabs {:default-tab default-tab
+                           :name :change-type} schema preview-changes]])])])
 
 (defn modal [{:keys [cancel-view]} & more]
   [:<>
    [:div.revision
     [:div.inner-revision
      [change-screen-button "Cancel" cancel-view]
-     more]]])
+     (vec (concat [:<>] more))]]])
+
+;; NOTE this is a bit hacky we could represent corrections as
+;; append/deletes before this
+(defn rewrite-corrections
+  "Rewrite corrections in change-set preview data as append/delete
+  operations for history."
+  [{:keys [corrections] :as change-set}]
+
+  (let [correction-appends (set (map #(dissoc % :previous-obs :previous-value) corrections))
+        correction-deletes (set (map :previous-obs corrections))]
+
+    (-> change-set
+        (update :append set/union correction-appends)
+        (update :delete set/union correction-deletes)
+        (dissoc :corrections))))
+
+(defn save-commit [{:keys [history] :as state} change-set message]
+  (let [commit (-> change-set
+                   (update :append set)
+                   (update :delete set)
+                   ;;(update :corrections set) ;; TODO corrections
+                   (assoc :comment message)
+                   (dissoc :duplicate)
+                   (rewrite-corrections))]
+    (-> state
+        (update :history conj commit)
+        (assoc :selected-revision (inc (count history)))
+        (dissoc :preview-data)
+        (assoc :mode :mode/view-cube))))
 
 (defn app []
   (let [{:keys [history] :as st} @state]
@@ -652,7 +695,29 @@
                         [:div.inner-revision
                          [data-and-history st]]]]
 
-      :mode/create-revision (let [schema (:default (:schemas st))]
+      :mode/view-deltas [:<>
+                         [modal {:cancel-view :mode/view-cube}
+                          [:h1 "View History"]
+                          (let [{:keys [history]} st
+                                schema (:schema/default (:schemas st))]
+
+                            [history-data-table
+                             (build-delta-schema schema)
+                             (->> history
+                                  (map-indexed vector)
+                                  (reverse)
+                                  (mapcat (fn [[revision-num {:keys [append delete comment] :as history-item}]]
+                                            ^{:key hi}
+                                            (map (fn [row]
+                                                   (assoc row
+                                                          :revision-id (inc revision-num)
+                                                          :comment comment))
+                                                 (concat (map #(assoc % :operation-type :append)
+                                                              append)
+                                                         (map #(assoc % :operation-type :delete)
+                                                              delete))))))])]]
+
+      :mode/create-revision (let [schema (:schema/default (:schemas st))]
                               [modal {:cancel-view :mode/view-cube}
                                (let [next-revision (inc (:selected-revision st))]
                                  [:<>
@@ -661,10 +726,10 @@
 
                                    [:<>
                                     (if (failures? preview-changes)
-                                      [error-display schema (select-keys preview-changes [:errors :duplicates])]
+                                      [error-display schema (select-keys preview-changes [:errors :duplicate])]
                                       [change-set schema preview-changes])
                                     (when (and (not (failures? preview-changes))
-                                               (not= :no-changes (categorise-change-type preview-changes)))
+                                               (not= :no-changes (categorise-change-tab preview-changes)))
                                       [:<>
                                        [:br]
                                        [:button {:on-click (fn [_]
@@ -686,7 +751,7 @@
                              (let [next-revision (inc (:selected-revision st))]
                                [:<>
                                 [:h1 (str "Create revision: " next-revision)]])
-                             (let [schema (:default (:schemas st))
+                             (let [schema (:schema/default (:schemas st))
                                    {:keys [candidate/changes]} st]
 
                                [:<>
@@ -696,22 +761,13 @@
                                                          (swap! state assoc :commit/message (-> e .-target .-value)))}]
                                 [:br]
                                 [:button {:on-click (fn [_]
-                                                      (let [changes (-> (set/rename-keys changes {:appends :append
-                                                                                                  :deletes :delete}) ;; TODO fix the need for this
-                                                                        (update :append set)
-                                                                        (update :delete set)
-                                                                        ;;(update :corrections set) ;; TODO corrections
-                                                                        (assoc :comment (:commit/message @state))
-                                                                        (dissoc :duplicates
-                                                                                :corrections))]
-                                                        (swap! state update :history conj changes)
-                                                        (swap! state assoc :selected-revision (count (:history @state)))
-                                                        (swap! state dissoc :preview-data)
-                                                        (swap! state assoc :mode :mode/view-cube)))}
+                                                      (swap! state save-commit changes (:commit/message @state)))}
                                  "Commit change set"]
                                 [change-set schema changes]])]
 
       [:<> [:h1 "Error"]])))
+
+
 
 (defn ^:dev/before-load stop []
   (js/console.log "stopping"))
