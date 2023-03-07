@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Datacube Update Process</title>
+    <style>
+
+      .tabs input { display: none; }
+      .tabs input + label { display: inline-block }
+
+      .tabs input ~ .tab { display: none }
+      .tabs input:checked ~ .tab-pane {
+          display: block;
+          border: 1px solid;
+          border-color: black;
+          padding: 0.5em;
+      }
+
+      .tabs input + label {
+          border: 1px solid #999;
+          background: #EEE;
+          padding: 4px 12px;
+          border-radius: 4px 4px 0 0;
+          position: relative;
+          top: 1px;
+          font-style: bold;
+      }
+      .tabs input:checked + label {
+          background: #FFF;
+          border-bottom: 1px solid transparent;
+      }
+
+      .tabs input:disabled + label {
+          background: #ddd;
+          font-style: italic;
+          color: #888;
+      }
+
+      .tabs input ~ .tab {
+          border-top: 1px solid #999;
+          padding: 12px;
+      }
+
+      .datatype {
+          font-weight: normal ;
+          color: gray;
+      }
+
+      th {
+          border-bottom: 1px solid;
+          padding: 0px;
+          border-color: darkslategrey;
+      }
+
+      table {
+          border-spacing: 2px;
+      }
+
+th, td {
+    padding: 4px ;
+}
+
+.revision {
+    border: 1px solid;
+}
+
+.revision-number {
+    font-weight: bold;
+    padding-right: 10px;
+}
+
+.history-items {
+    list-style: none;
+    padding-left: 4px;
+}
+
+
+.inner-revision {
+      padding: 10px 10px 10px 10px;
+}
+
+.toggles {
+    border-bottom: 1px solid;
+}
+
+fieldset {
+    border: 0;
+}
+
+  dl {
+      padding: 0.5em;
+  }
+  dt {
+      float: left;
+      clear: left;
+      text-align: right;
+      font-weight: bold;
+  }
+  dt::after {
+    content: ":";
+  }
+      dd {
+      margin: 0;
+      margin-left: 10px;
+      padding: 0 10px 0.5em 0;
+  }
+
+    </style>
+
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="./js/main.js"></script>
+  </body>
+</html>
