@@ -359,19 +359,31 @@
     (let [cols (map :name columns)
           data (->> csv-str
                     (str/split-lines)
-                    (map #(str/split % #","))
-                    (map (fn [row]
-                           (apply hash-map (interleave cols row)))))]
+                    (map #(str/split % #",")))
+          cell-counts (distinct (map count data))]
+      (if (not= 1 (count cell-counts))
+        (throw (ex-info "Schema error" {:schema-error :ragged-rows}))
 
-      (for [row data]
-        (reduce (fn [row {col-name :name :as col}]
-                  (if (get row col-name)
-                    (update row
-                            col-name
-                            #(transform-cell-datatype col %))
-                    row))
-                row
-                columns)))))
+        (if (not= (count columns)
+                  (first cell-counts))
+          (throw (ex-info "Schema error" {:schema-error :invalid-tidy-data}))
+          (let [schemad-data (->> data
+                                  (map (fn [row]
+                                         (apply hash-map (interleave cols row)))))]
+            (for [row schemad-data]
+              (reduce (fn [row {col-name :name :as col}]
+                        (if (get row col-name)
+                          (update row
+                                  col-name
+                                  #(transform-cell-datatype col %))
+                          row))
+                      row
+                      columns))))))))
+
+(comment
+  (parse-csv default-schema "W06000022,2004-01-01T00:00:00/P3Y,Female\n")
+
+  (parse-csv default-schema "W06000022,2004-01-01T00:00:00/P3Y,Female,80.7\nW06000022,2004-01-01T00:00:00/P3Y,Male,77.1\nW06000022,2005-01-01T00:00:00/P3Y,Female,80.9\nW06000022,2005-01-01T00:00:00/P3Y,Malez,72.9,213"))
 
 (defn write-csv [{:keys [selected-schema include-header] :as state}]
   (let [table-data (build-table-for-selected-revision state)
@@ -449,22 +461,22 @@
     (-> (apply-validations schema new-table)
         (assoc
          :duplicate (reduce-kv
-                      (fn [acc k-row v]
-                        (let [n (count v)]
-                          (if (>= n 2)
-                            (conj acc (assoc k-row :duplicate-count n
-                                             :errors #{:duplicate-count}))
-                            acc)))
-                      #{}
-                      (group-by identity new-table-hashed))
+                     (fn [acc k-row v]
+                       (let [n (count v)]
+                         (if (>= n 2)
+                           (conj acc (assoc k-row :duplicate-count n
+                                            :errors #{:duplicate-count}))
+                           acc)))
+                     #{}
+                     (group-by identity new-table-hashed))
          :append appended-data
 
          :delete (let [in-new-table? (set (map :comp-hash new-table-hashed))]
-                    (filter (fn [old-row]
-                              (let [h (:comp-hash old-row)]
-                                (and (in-orig-table? h)
-                                     (not (in-new-table? h)))))
-                            orig-table))
+                   (filter (fn [old-row]
+                             (let [h (:comp-hash old-row)]
+                               (and (in-orig-table? h)
+                                    (not (in-new-table? h)))))
+                           orig-table))
          :corrections (->> new-table-hashed
                            (map (fn [new-row]
                                   (let [orig-row (lookup-by-comp-hash (:comp-hash new-row))
@@ -565,7 +577,7 @@
 (defn error-display [schema {:keys [errors duplicate]}]
   (let [num-errors (count errors)]
     [:<>
-     [:h2 (if (seq errors)
+     [:h2 (if (or (seq errors))
             "❌"
             "✅") " Validations"]
 
@@ -723,11 +735,21 @@
                                  [:<>
                                   [:h1 (str "Create revision: " next-revision)]]
                                  (let [{:keys [preview-changes]} st]
-
                                    [:<>
-                                    (if (failures? preview-changes)
-                                      [error-display schema (select-keys preview-changes [:errors :duplicate])]
-                                      [change-set schema preview-changes])
+                                    (let [schema-error (:schema-error st)]
+
+                                      [:<>
+
+                                       (cond
+                                         schema-error [:<>
+                                                       [:h2 "❌ Invalid Schema"]
+                                                       [:p (cond
+                                                             (= :invalid-tidy-data schema-error)
+                                                             "Supplied tidy data does not match expected schema"
+                                                             (= :ragged-rows schema-error)
+                                                             "Supplied data is not tidy (it has ragged rows) and does not match the expected schema")]]
+                                         (failures? preview-changes) [error-display schema (select-keys preview-changes [:errors :duplicate])]
+                                         :else [change-set schema preview-changes])])
                                     (when (and (not (failures? preview-changes))
                                                (not= :no-changes (categorise-change-tab preview-changes)))
                                       [:<>
@@ -739,10 +761,17 @@
                                     [:p "Please provide a CSV which conforms to the releases table schema."]
                                     [:em "(Note we have loaded the data from the previous revision r" (count history) ")"]
                                     (let [update-preview! (fn [e]
-                                                            (let [preview-data (parse-csv schema (-> e .-target .-value))]
-                                                              (swap! state assoc
-                                                                     :preview-data preview-data
-                                                                     :preview-changes (make-table-diff schema (build-table-for-last-revision st) preview-data))))]
+                                                            (try (let [preview-data (parse-csv schema (-> e .-target .-value))]
+
+                                                                   (swap! state assoc
+                                                                          :preview-data preview-data
+                                                                          :preview-changes (make-table-diff schema (build-table-for-last-revision st) preview-data))
+                                                                   (swap! state dissoc :schema-error))
+                                                                 (catch js/Error ex
+                                                                   (let [{:keys [schema-error]} (ex-data ex)]
+                                                                     (swap! state assoc
+                                                                            :schema-error schema-error)))))]
+
                                       [:textarea {:rows 20 :cols 145
                                                   :default-value (write-csv (assoc st :selected-schema schema))
                                                   :on-change update-preview!}])]))])
